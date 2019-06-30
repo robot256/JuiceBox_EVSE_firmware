@@ -54,6 +54,7 @@ const int V_AC_sensitivity=180; // normally 180 (empirical)
 #define JB_WiFi_simple // is WiFi installed and we are just pushing data?
 // #define JB_WiFi_control // is this JuiceBox controllable with WiFi (through HTTP responses)
 // #define LCD_SGC // old version of the u144 LCD - used in some early JuiceBoxes
+// #define LCD_SPE // new LCD - comment both to remove all LCD code
  #define PCB_83 // 8.3+ version of the PCB, includes 8.6, 8.7 versions
  #define VerStr "V8.7.9" // detailed exact version of firmware (thanks Gregg!)
  #define GFI // need to be uncommented for GFI functionality
@@ -86,12 +87,19 @@ const char UDPpacketEndSig[2]="\n"; // what is the signature of the packet end (
 #ifdef LCD_SGC
   #include <uLCD_144.h>
   uLCD_144 *myLCD;
+  #define LCD_INC
 #else
+#ifdef LCD_SPE
   #include <uLCD_144_SPE.h>
   uLCD_144_SPE *myLCD;
+  #define LCD_INC
+#endif
 #endif
 
+#ifdef LCD_INC
 byte LCD_on=0; // this defines base vs. premium versions
+#endif
+
 byte REMOTE_ON=0; // this tells us if a remote is present or not
 
 //------------------ current sensor calibration - only for AC1075 for now -----------------------------------------------
@@ -337,7 +345,8 @@ void setup() {
 
   sei();
   //---------------------------------- end timer setup
-  
+
+#ifdef LCD_INC
   //================= initialize the display ===========================================
 #ifdef LCD_SGC
   *myLCD=uLCD_144(9600);
@@ -349,7 +358,8 @@ void setup() {
   // check if the display started / is present
   // if not present, we will assume this is the Base edition
   LCD_on=myLCD->isAlive();
-  
+#endif
+
 #ifdef JB_WiFi_simple 
   wifiSerial.begin(9600);
 #endif
@@ -393,13 +403,14 @@ void setup() {
   // set the clock offset; later in code, #of sec from midnight can be calculated as
   //     sec_up-clock_offset
   clock_offset=sec_up-long(day*24+hour)*3600-long(mins)*60; 
-  
+#ifdef LCD_INC
   if(LCD_on) { // this is a PREMIUM edition with LCD
     myLCD->setOpacity(1);
     myLCD->setMode(1); // reverse landscape
 
     printClrMsg(F("Thank You for\nchoosing \nJ.u.i.c.e B.o.x !!!"), 5000, 0, 0x3f, 0);
   }
+#endif
   
   // auto-sense the remote
   // button D pin is set as INPUT_PULLUP - this means that if there is no remote, it will read '1'
@@ -625,7 +636,7 @@ void loop() {
     int savings=int(configuration.energy*savingsPerKWH/100);
     
     printTime();
-    
+#ifdef LCD_INC
     if(LCD_on) {
       switch(cycleVar) {
         case 2:
@@ -658,7 +669,9 @@ void loop() {
       
       if(isBtnPressed(pin_ctrlBtn_A)) ctrlMenu();
   
-    } else {
+    } else 
+#endif
+    {
       
       // no LCD
       sprintf(str, "%dV, %dA", int(inV_AC), int(outC));
@@ -748,9 +761,12 @@ void setOutC() {
   // different trimpot depending on voltage
   if(inV_AC==120) {
 #ifdef trim120current  
+#ifdef LCD_INC
     if(configuration.outC_120>0 && LCD_on) {
       outC=configuration.outC_120;
-    } else {
+    } else 
+#endif
+    {
       throttle=analogRead(pin_throttle120)/1024.;
       if(throttle>minThrottle) { // if something is set on the throttle pot, use that instead of the default outC
         outC=throttle*nominal_outC_120V*2; // full range is 2x of nominal
@@ -761,9 +777,12 @@ void setOutC() {
 #endif
   } else {
     // 208V+ setting
+#ifdef LCD_INC
     if(configuration.outC_240>0 && LCD_on) {
       outC=configuration.outC_240;
-    } else {    
+    } else 
+#endif
+    {    
       throttle=analogRead(pin_throttle)/1024.;
       if(throttle>minThrottle) { // if something is set on the throttle pot, use that instead of the default outC
         outC=throttle*maxC;
@@ -949,7 +968,7 @@ float read_C() {
 #endif
 }
 
-
+#ifdef LCD_INC
 //------------------------------ control MENUs -----------------------------------------
 // this is generally called by pressing 'A' button on the remote
 void ctrlMenu() {
@@ -1167,25 +1186,32 @@ byte waitForBtn() {
   }
 }
 //------------------------------ END control MENUs -------------------------------------
-
+#endif
 
 //------------------------------ printing help functions -------------------------
 void printJBstr(byte col, byte row, byte font, byte c1, byte c2, byte c3, const __FlashStringHelper *fstr) {
+#ifdef LCD_INC
   if(LCD_on) {
     myLCD->printStr(col, row, font, c1, c2, c3, fstr);
-  } else {
+  } else 
+#endif
+  {
     Serial.print("    ");
     Serial.println(fstr);
   }
 }
 void printJBstr(byte col, byte row, byte font, byte c1, byte c2, byte c3, const char *sstr) {
+#ifdef LCD_INC
   if(LCD_on) {
     myLCD->printStr(col, row, font, c1, c2, c3, sstr);
-  } else {
+  } else 
+#endif
+  {
     Serial.print("    ");
     Serial.println(sstr);
   }
 }
+
 void printClrMsg(const __FlashStringHelper *fstr, const int del, const byte red, const byte green, const byte blue) {
   myclrScreen();
   printJBstr(0, 2, 2, red, green, blue, fstr);      
@@ -1196,6 +1222,7 @@ void printClrMsg(const char *str, const int del, const byte red, const byte gree
   printJBstr(0, 2, 2, red, green, blue, str);      
   delay(del);
 }
+
 void printErrorMsg(const __FlashStringHelper *fstr, const int del) {
   printClrMsg(fstr, 30000, 0x1f, 0x3f, 0);
   // also send a message to server if WiFI is enabled
@@ -1207,9 +1234,12 @@ void printErrorMsg(const __FlashStringHelper *fstr, const int del) {
 
 // custom clear screen function. prints some header info
 void myclrScreen() {
+#ifdef LCD_INC
   if(LCD_on) {
     myLCD->clrScreen();
-  } else {
+  } else 
+#endif
+  {
     Serial.println("\n");
   }
   printTime();
@@ -1220,7 +1250,6 @@ void printTime() {
   sprintf(tempstr, "%s %02d:%02d (%d) ", VerStr, hourOfDay(), minsOfHour(), state); 
   printJBstr(0, 0, 2, 0x1f, 0, 0x1f, tempstr);     
 }
-
 
 #ifdef JB_WiFi_simple
 //==================== WIFI messaging functions ===============================================
@@ -1316,5 +1345,3 @@ void getSavingsPerKWH(int gascost, int mpg, int ecost, int whpermile) {
 void delaySecs(int secs) {
   for(int si=0; si<secs; si++) delay(1000);
 }
-
-
