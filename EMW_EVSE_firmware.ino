@@ -54,11 +54,11 @@ const int V_AC_sensitivity=180; // normally 180 (empirical)
 //#define JB_WiFi_simple // is WiFi installed and we are just pushing data?
 // #define JB_WiFi_control // is this JuiceBox controllable with WiFi (through HTTP responses)
 #define MQTT_WIFI // is WiFi installed and controlled via MQTT PubSub system
+#define DUMB_BUTTONS // makes A/B/C/D buttons command 12, 16, 24, and 40 amps.
 
 
 // #define LCD_SGC // old version of the u144 LCD - used in some early JuiceBoxes
 // #define LCD_SPE // new LCD - comment both to remove all LCD code
-// #define DUMB_BUTTONS // makes A/B/C/D buttons command 12, 16, 24, and 40 amps.
  #define PCB_83 // 8.3+ version of the PCB, includes 8.6, 8.7 versions
  #define VerStr "V8.7.9a" // detailed exact version of firmware (thanks Gregg!)
  #define GFI // need to be uncommented for GFI functionality
@@ -221,8 +221,8 @@ const unsigned int MAXDUTY=970; // <97% to stay in AC charging zone for J1772 st
 
 const float maxC=60; // max rated current
 float inV_AC=0; // this will be measured
-const float nominal_outC_240V=30; // 30A by default from a 240VAC line
-const float nominal_outC_120V=15; // 15A by default from a 120VAC line
+const float nominal_outC_240V=40; // 40A by default from a 240VAC line
+const float nominal_outC_120V=12; // 12A by default from a 120VAC line
 float commanded_outC=0.; // modified by MQTT and Buttons, ignored if set to zero
 float outC=nominal_outC_240V; 
 float power=0;
@@ -308,12 +308,27 @@ ISR(TIMER2_COMPA_vect) { //timer2 interrupt 8kHz toggles pin
   }
 
 #ifdef BuzzerIndication
+  #ifdef DUMB_BUTTONS
+  // Play continuous musical tones
   // disable buzzer by this one
-  if(tmr2th==0) {
+  if(tmr2th == 0) {
     digitalWrite(pin_buzzer, LOW);
     return;
   }
+  // One 1ms impulse every tmr2th milliseconds
+  if(tmr2cnt2 == 0)
+    digitalWrite(pin_buzzer,HIGH);
+  else
+    digitalWrite(pin_buzzer,LOW);
+  if(tmr2cnt2>=tmr2th) tmr2cnt2=0; // reset to zero on overflow
   
+  #else
+  // disable buzzer by this one
+  if(tmr2th == 0) {
+    digitalWrite(pin_buzzer, LOW);
+    return;
+  }
+  // 1ms impulses every 16ms (61Hz)
   if(tmr2cnt2>tmr2th/2) {
     if((tmr2cnt2%16)==14) {
       digitalWrite(pin_buzzer,HIGH);
@@ -326,6 +341,7 @@ ISR(TIMER2_COMPA_vect) { //timer2 interrupt 8kHz toggles pin
   }
   
   if(tmr2cnt2>tmr2th) tmr2cnt2=0; // reset to zero on overflow
+  #endif
 #endif
 }
 //-------------------------------------- END BUZZER CODE -------------------------------------------------
@@ -339,11 +355,15 @@ void setup() {
   pinMode(pin_ctrlBtn_A, INPUT);
   pinMode(pin_ctrlBtn_C, INPUT);
   pinMode(pin_ctrlBtn_D, INPUT_PULLUP);
-
+  #ifdef DUMB_BUTTONS
+  pinMode(pin_WPS,INPUT_PULLUP);
+  #else
+  // pinMode(pin_WPS, OUTPUT); // do NOT do this if there is a remote installed!
+  #endif
+  
   // set digital output pins
   pinMode(pin_PWM, OUTPUT);
   pinMode(pin_inRelay, OUTPUT);
-  // pinMode(pin_WPS, OUTPUT); // do NOT do this if there is a remote installed!
   pinMode(pin_GFItest, OUTPUT);
 #ifdef BuzzerIndication
   pinMode(pin_buzzer, OUTPUT);
@@ -412,8 +432,8 @@ void setup() {
     configuration.day=day;
     configuration.hour=hour;
     configuration.mins=mins;
-    configuration.outC_240=30;
-    configuration.outC_120=15;
+    configuration.outC_240=40;
+    configuration.outC_120=12;
   } else {
     day=configuration.day;
     hour=configuration.hour;
@@ -595,11 +615,14 @@ void loop() {
     setRelay(LOW); // relay off
     // check if we are ok to run - but ONLY if there is a remote control to allow override
     min2nextrun=timeToNextRun();
+    #ifndef DUMB_BUTTONS
     if(min2nextrun>0 && !isBtnPressed(pin_ctrlBtn_C) && REMOTE_ON) { 
       sprintf(str, "Wait %d min    ", min2nextrun); 
       printJBstr(0, 12, 1, 0x1f, 0x3f, 0x1f, str);  
       setPilot(PWM_FULLON);
-    } else {
+    } else 
+    #endif
+    {
       // clear part of screen
       printJBstr(0, 12, 1, 0x1f, 0x3f, 0x1f, F("               "));    
       setOutC();
@@ -632,17 +655,19 @@ void loop() {
         printJBstr(0, 5, 2, 0x1f, 0x3f, 0, str);   
     sprintf(str, "%dV, %dA (%d) ", int(inV_AC), int(outC_meas), int(outC)); 
         printJBstr(0, 7, 2, 0x1f, 0x3f, 0, str);   
-        
+
+    #ifndef DUMB_BUTTONS
     // print button menu
     printJBstr(0, 9, 2, 0, 0, 0x1f, F("A=outC+, D=outC- \nB=WPS")); 
     if(isBtnPressed(pin_ctrlBtn_A)) {
-      if(inV_AC>160) configuration.outC_240++;
+      if(inV_AC>V_AC_threshold) configuration.outC_240++;
       else configuration.outC_120++;
     }
     if(isBtnPressed(pin_ctrlBtn_D)) {
-      if(inV_AC>160) configuration.outC_240--;
+      if(inV_AC>V_AC_threshold) configuration.outC_240--;
       else configuration.outC_120--;
     }
+    #endif
 
     // send out a report to MotherShip via WiFi if on
 #ifdef JB_WiFi_simple
@@ -707,8 +732,10 @@ void loop() {
   
       // print button menu
       printJBstr(0, 10, 2, 0, 0, 0x1f, F("A=MENU, B=WPS \nC=FORCE START")); 
-      
+
+      #ifndef DUMB_BUTTONS
       if(isBtnPressed(pin_ctrlBtn_A)) ctrlMenu();
+      #endif
   
     } else 
 #endif
@@ -738,6 +765,12 @@ void loop() {
     }
   #endif
 
+  }
+
+  delay(meas_cycle_delay); // reasonable delay for screen refresh
+
+
+
   #ifdef MQTT_WIFI
   // Reconnect if necessary
   if (!client.connected()) {
@@ -758,12 +791,27 @@ void loop() {
     // Client connected
     client.loop();
   }
+  #endif
 
+  #ifdef DUMB_BUTTONS
+  // Check buttons
+  if(isBtnPressed(pin_ctrlBtn_A)) {
+    commanded_outC = 12.0;
+    tmr2th = 4;
+  } else if(isBtnPressed(pin_WPS)) {
+    commanded_outC = 16.0;
+    tmr2th = 3;
+  } else if(isBtnPressed(pin_ctrlBtn_C)) {
+    commanded_outC = 24.0;
+    tmr2th = 2;
+  } else if(isBtnPressed(pin_ctrlBtn_D)) {
+    commanded_outC = 40.0;
+    tmr2th = 1;
+  } else {
+    tmr2th = 0;
+  }
   #endif
   
-  }
-
-  delay(meas_cycle_delay); // reasonable delay for screen refresh
 
 #ifdef GFI
   // check GFI flag (if a trip is detected, this flag would be set via the special interrupt)
