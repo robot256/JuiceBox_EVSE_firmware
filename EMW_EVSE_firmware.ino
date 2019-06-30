@@ -51,12 +51,16 @@ const int R_C=120; // this is the value of the shunting resistor. see datasheet 
 const int V_AC_threshold=164; // normally 164 (midpoint between 120V and 208V
 const int V_AC_sensitivity=180; // normally 180 (empirical)
 // #define JB_WiFi // is WiFi installed & we are using WiFlyHQ library?
-#define JB_WiFi_simple // is WiFi installed and we are just pushing data?
+//#define JB_WiFi_simple // is WiFi installed and we are just pushing data?
 // #define JB_WiFi_control // is this JuiceBox controllable with WiFi (through HTTP responses)
+#define MQTT_WIFI // is WiFi installed and controlled via MQTT PubSub system
+
+
 // #define LCD_SGC // old version of the u144 LCD - used in some early JuiceBoxes
 // #define LCD_SPE // new LCD - comment both to remove all LCD code
+// #define DUMB_BUTTONS // makes A/B/C/D buttons command 12, 16, 24, and 40 amps.
  #define PCB_83 // 8.3+ version of the PCB, includes 8.6, 8.7 versions
- #define VerStr "V8.7.9" // detailed exact version of firmware (thanks Gregg!)
+ #define VerStr "V8.7.9a" // detailed exact version of firmware (thanks Gregg!)
  #define GFI // need to be uncommented for GFI functionality
  #define trim120current
  #define BuzzerIndication // indicate charging states via buzzer - only on V8.7 and higher
@@ -72,10 +76,16 @@ const int V_AC_sensitivity=180; // normally 180 (empirical)
 
 // WiFi library mega slon
 #include <SoftwareSerial.h>
-#include <WiFlyHQ.h>
+#ifdef MQTT_WIFI
+  #include <SPI.h>
+  #include <WiFly.h>
+  #include <PubSubClient.h>
+#else
+  #include <WiFlyHQ.h>
+  //-------------------- WiFi UDP settings --------------------------------------------------------------------
+  const char UDPpacketEndSig[2]="\n"; // what is the signature of the packet end (should match the WiFly setting)
+#endif
 
-//-------------------- WiFi UDP settings --------------------------------------------------------------------
-const char UDPpacketEndSig[2]="\n"; // what is the signature of the packet end (should match the WiFly setting)
 
 // need this to remap PWM frequency
 #include <TimerOne.h>
@@ -213,6 +223,7 @@ const float maxC=60; // max rated current
 float inV_AC=0; // this will be measured
 const float nominal_outC_240V=30; // 30A by default from a 240VAC line
 const float nominal_outC_120V=15; // 15A by default from a 120VAC line
+float commanded_outC=0.; // modified by MQTT and Buttons, ignored if set to zero
 float outC=nominal_outC_240V; 
 float power=0;
 float energy=0; // how much energy went through - in kWHrs 
@@ -262,6 +273,22 @@ byte day=5, hour=12, mins=0; // default day is Sat, time is noon, 0 min
 #ifdef JB_WiFi
   SoftwareSerial wifiSerial(pin_sRX, pin_sTX);
   WiFly wifly;
+#endif
+
+#ifdef MQTT_WIFI
+  SoftwareSerial wifiSerial(pin_sRX, pin_sTX);
+  WiFlyClient wiflyClient;
+  IPAddress server(172, 16, 0, 2);
+  PubSubClient client(wiflyClient);
+  long lastReconnectAttempt = 0;
+  float lastPublishedAmps = 0.;
+  const char* mqttStateA = "READY";
+  const char* mqttStateB = "CONNECTED";
+  const char* mqttStateC = "CHARGING";
+  const char* mqttStateD = "ERROR";
+  const char* mqttPubStateTopic = "/house/evse/state";
+  const char* mqttPubAmpsTopic = "/house/evse/ampsSet";
+  const char* mqttSubAmpsTopic = "/house/evse/ampsCmd";
 #endif
 
 
@@ -362,6 +389,14 @@ void setup() {
 
 #ifdef JB_WiFi_simple 
   wifiSerial.begin(9600);
+#endif
+
+#ifdef MQTT_WIFI
+  wifiSerial.begin(9600);
+  WiFly.setUart(&wifiSerial);
+  WiFly.begin();
+  client.setServer(server, 1883);
+  client.setCallback(mqttCallback);
 #endif
 
   // the time settings only valid in the PREMIUM edition
@@ -502,6 +537,12 @@ void setup() {
   
   myclrScreen();
 
+  #ifdef MQTT_WIFI
+  // Delay for WiFly to connect to WiFi
+  delay(1500);
+  lastReconnectAttempt = 0;
+  #endif
+
   // initialize in state A - EVSE ready
   setPilot(PWM_FULLON);
 }
@@ -610,7 +651,7 @@ void loop() {
       sprintf(str, "V%d,L%d,E%d,A%d,P%d", int(inV_AC), int(configuration.energy+energy), int(energy*10), int(outC_meas*10), int(power*10));
       sendWiFiMsg(str);
     }
-#endif    
+#endif
   } // end state_C
   
   if(state==STATE_D) {
@@ -696,6 +737,29 @@ void loop() {
       sendWiFiMsg(str);
     }
   #endif
+
+  #ifdef MQTT_WIFI
+  // Reconnect if necessary
+  if (!client.connected()) {
+    long now = millis();
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      // Attempt to reconnect
+      if (mqttReconnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  } else {
+    // Check if we need to update the commanded value
+    if (lastPublishedAmps != outC) {
+      mqttPublishAmps();
+    }
+    
+    // Client connected
+    client.loop();
+  }
+
+  #endif
   
   }
 
@@ -714,7 +778,7 @@ void loop() {
 #ifndef DEBUGGFI                 
       delaySecs(900); // 15 min
 #endif
-    }  
+    }
   }
 #endif
 
@@ -761,11 +825,11 @@ void setOutC() {
   // different trimpot depending on voltage
   if(inV_AC==120) {
 #ifdef trim120current  
-#ifdef LCD_INC
+  #ifdef LCD_INC
     if(configuration.outC_120>0 && LCD_on) {
       outC=configuration.outC_120;
     } else 
-#endif
+  #endif
     {
       throttle=analogRead(pin_throttle120)/1024.;
       if(throttle>minThrottle) { // if something is set on the throttle pot, use that instead of the default outC
@@ -789,6 +853,10 @@ void setOutC() {
       }
     }
   }
+
+  // Adjust based on dynamic commands, but don't exceed the persistent settings
+  if (commanded_outC > 0)
+    outC=min(commanded_outC, outC);
 
   // per J1772 standard:
   // 1% duty = 0.6A until 85% duty cycle
@@ -1280,6 +1348,61 @@ void sendWiFiMsg(const __FlashStringHelper *fstr, int dummy) {
 //===================== END WiFi messaging functions ===========================================
 #endif
 //---------------------------- end printing help functions ------------------------
+
+
+//==================== START MQTT WIFI control functions =======================================
+
+
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Handle amps command received
+  if (strcmp(topic, mqttSubAmpsTopic)==0) {
+    unsigned int i;
+    for(i=0; i<length && i < 23; i++)
+      tempstr[i] = payload[i];
+    tempstr[i] = 0;
+    commanded_outC = atof(tempstr);
+    commanded_outC = max(commanded_outC, 0.);
+    
+  }
+}
+
+void mqttPublishState() {
+  if (state == STATE_A)
+      client.publish(mqttPubStateTopic, mqttStateA);
+    else if (state == STATE_B)
+      client.publish(mqttPubStateTopic, mqttStateB);
+    else if (state == STATE_C)
+      client.publish(mqttPubStateTopic, mqttStateC);
+    else
+      client.publish(mqttPubStateTopic, mqttStateD);
+}
+
+void mqttPublishAmps() {
+  sprintf(tempstr,"%.1f",outC);
+  client.publish(mqttPubAmpsTopic, tempstr);
+  lastPublishedAmps = outC;
+}
+
+boolean mqttReconnect() {
+  if (client.connect("juiceboxClient")) {
+    // Report EVSE state
+    mqttPublishState();
+
+    // Report amps setting
+    mqttPublishAmps();
+    
+    // Subscribe to amps command channel
+    client.subscribe(mqttSubAmpsTopic);
+  }
+  return client.connected();
+}
+
+
+
+
+//==================== END MQTT WIFI control functions =========================================
+
 
 //---------------------------- input control functions ----------------------------
 // this takes max of 50ms if the button is pressed
